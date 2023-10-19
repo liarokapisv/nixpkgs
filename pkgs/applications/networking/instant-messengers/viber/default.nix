@@ -1,103 +1,87 @@
-{fetchurl, lib, stdenv, dpkg, makeWrapper,
- alsa-lib, cups, curl, dbus, expat, fontconfig, freetype, glib, gst_all_1,
- harfbuzz, libcap, libGL, libGLU, libpulseaudio, libxkbcommon, libxml2, libxslt,
- nspr, nss, openssl_1_1, systemd, wayland, xorg, zlib, ...
+{ lib
+, fetchurl
+, autoPatchelfHook
+, dpkg
+, gst_all_1
+, stdenv
+, qt6
+, icu66
+, makeBinaryWrapper
 }:
 
 stdenv.mkDerivation {
+
   pname = "viber";
-  version = "16.1.0.37";
+  version = "20.3.0.1";
 
   src = fetchurl {
     # Official link: https://download.cdn.viber.com/cdn/desktop/Linux/viber.deb
-    url = "https://web.archive.org/web/20211119123858/https://download.cdn.viber.com/cdn/desktop/Linux/viber.deb";
-    sha256 = "sha256-hOz+EQc2OOlLTPa2kOefPJMUyWvSvrgqgPgBKjWE3p8=";
+    url = "https://web.archive.org/web/20230906015353/https://download.cdn.viber.com/cdn/desktop/Linux/viber.deb";
+    sha256 = "03h8k73b5lngpddkww8z8wdg1lrnn4rncwr9v69acsw1j1hplf30";
   };
 
-  nativeBuildInputs = [ makeWrapper ];
-  buildInputs = [ dpkg ];
+  nativeBuildInputs = [
+    makeBinaryWrapper
+    autoPatchelfHook
+    dpkg
+  ];
 
-  dontUnpack = true;
+  buildInputs = [
+    qt6.qtbase
+    qt6.full
+    icu66
+  ];
 
-  libPath = lib.makeLibraryPath [
-      alsa-lib
-      cups
-      curl
-      dbus
-      expat
-      fontconfig
-      freetype
-      glib
-      gst_all_1.gst-plugins-base
-      gst_all_1.gstreamer
-      harfbuzz
-      libcap
-      libGLU libGL
-      libpulseaudio
-      libxkbcommon
-      libxml2
-      libxslt
-      nspr
-      nss
-      openssl_1_1
-      stdenv.cc.cc
-      systemd
-      wayland
-      zlib
+  dontWrapQtApps = true;
 
-      xorg.libICE
-      xorg.libSM
-      xorg.libX11
-      xorg.libxcb
-      xorg.libXcomposite
-      xorg.libXcursor
-      xorg.libXdamage
-      xorg.libXext
-      xorg.libXfixes
-      xorg.libXi
-      xorg.libXrandr
-      xorg.libXrender
-      xorg.libXScrnSaver
-      xorg.libXtst
-      xorg.xcbutilimage
-      xorg.xcbutilkeysyms
-      xorg.xcbutilrenderutil
-      xorg.xcbutilwm
-  ]
-  ;
+  installPhase =
+    let
+      gstreamerPluginPath = lib.makeSearchPath "lib/gstreamer-1.0/" [
+        gst_all_1.gstreamer.out
+        gst_all_1.gst-plugins-base
+        gst_all_1.gst-plugins-good
+        gst_all_1.gst-plugins-ugly
+        gst_all_1.gst-plugins-bad
+      ];
+    in
+    ''
+      dpkg-deb -x $src $out
+      mkdir -p $out/bin
 
-  installPhase = ''
-    dpkg-deb -x $src $out
-    mkdir -p $out/bin
+      # Soothe nix-build "suspicions"
+      chmod -R g-w $out
 
-    # Soothe nix-build "suspicions"
-    chmod -R g-w $out
+      # QT_QPA_PLATFORM_PLUGIN_PATH maybe should be set at the desktop-manager level.
+      # GST_PLUGIN_PATH is specified because Qt6's QGStreamerMediaPlayer calls
+      # gst_element_factory_make which in turn uses the env variable to perform the lookup.
 
-    for file in $(find $out -type f \( -perm /0111 -o -name \*.so\* \) ); do
-      patchelf --set-interpreter "$(cat $NIX_CC/nix-support/dynamic-linker)" "$file" || true
-      patchelf --set-rpath $libPath:$out/opt/viber/lib $file || true
-    done
+      wrapProgram $out/opt/viber/Viber \
+      --set QT_QPA_PLATFORM_PLUGIN_PATH "${qt6.full}/lib/qt-6/plugins/platforms" \
+      --set QML2_IMPORT_PATH "${qt6.full}/lib/qt-6/qml" \
+      --set GST_PLUGIN_PATH "${gstreamerPluginPath}" \
+      --set XDG_DATA_DIRS "$out/share" \
 
-    # qt.conf is not working, so override everything using environment variables
-    wrapProgram $out/opt/viber/Viber \
-      --set QT_QPA_PLATFORM "xcb" \
-      --set QT_PLUGIN_PATH "$out/opt/viber/plugins" \
-      --set QT_XKB_CONFIG_ROOT "${xorg.xkeyboardconfig}/share/X11/xkb" \
-      --set QTCOMPOSE "${xorg.libX11.out}/share/X11/locale" \
-      --set QML2_IMPORT_PATH "$out/opt/viber/qml"
-    ln -s $out/opt/viber/Viber $out/bin/viber
+      ln -s $out/opt/viber/Viber $out/bin/Viber
 
-    mv $out/usr/share $out/share
-    rm -rf $out/usr
+      # Remove bundled dependencies.
+      rm -rf $out/opt/viber/lib
 
-    # Fix the desktop link
-    substituteInPlace $out/share/applications/viber.desktop \
-      --replace /opt/viber/Viber $out/opt/viber/Viber \
-      --replace /usr/share/ $out/share/
-  '';
+      # Remove bundled plugins.
+      rm -rf $out/opt/viber/plugins
 
-  dontStrip = true;
-  dontPatchELF = true;
+      # Symlink due to Qt6 not properly looking at QT_PLUGIN_PATH for plugin discovery in all cases.
+      # Should investigate.
+
+      ln -s "${qt6.full}/lib/qt-6/plugins" "$out/opt/viber/plugins"
+
+      mv $out/usr/share $out/share
+      rm -rf $out/usr
+
+      # Fix the desktop link
+      substituteInPlace $out/share/applications/viber.desktop \
+        --replace /opt/viber/Viber Viber \
+        --replace /usr/share/ $out/share/
+    '';
 
   meta = {
     homepage = "https://www.viber.com";
@@ -105,7 +89,6 @@ stdenv.mkDerivation {
     sourceProvenance = with lib.sourceTypes; [ binaryNativeCode ];
     license = lib.licenses.unfree;
     platforms = [ "x86_64-linux" ];
-    maintainers = with lib.maintainers; [ jagajaga ];
+    maintainers = with lib.maintainers; [ jagajaga liarokapisv ];
   };
-
 }
